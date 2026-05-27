@@ -1,0 +1,214 @@
+{
+  "info": {
+    "name": "Student CRUD API",
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "description": "A REST API for managing student records.\n\nBase URL: `http://localhost:5000`\n\nAll student endpoints are versioned under `/api/v1/students`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:5000",
+      "type": "string"
+    },
+    {
+      "key": "student_id",
+      "value": "1",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Healthcheck",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/healthcheck",
+              "host": ["{{base_url}}"],
+              "path": ["healthcheck"]
+            },
+            "description": "Returns the health status of the API and its database connection."
+          },
+          "response": [
+            {
+              "name": "200 OK – Healthy",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"status\": \"ok\",\n  \"database\": \"ok\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Students",
+      "item": [
+        {
+          "name": "Create Student",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  pm.collectionVariables.set('student_id', json.data.id);",
+                  "  pm.test('Student created', () => pm.response.to.have.status(201));",
+                  "  pm.test('Has id', () => pm.expect(json.data.id).to.be.a('number'));",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"Ada\",\n  \"last_name\": \"Lovelace\",\n  \"email\": \"ada.lovelace@example.com\",\n  \"date_of_birth\": \"1815-12-10\",\n  \"grade\": \"A\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/students",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "students"]
+            },
+            "description": "Creates a new student record. Email must be unique."
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "status": "Created",
+              "code": 201,
+              "body": "{\n  \"status\": \"success\",\n  \"data\": {\n    \"id\": 1,\n    \"first_name\": \"Ada\",\n    \"last_name\": \"Lovelace\",\n    \"email\": \"ada.lovelace@example.com\",\n    \"date_of_birth\": \"1815-12-10\",\n    \"grade\": \"A\",\n    \"created_at\": \"2024-01-01T10:00:00+00:00\",\n    \"updated_at\": \"2024-01-01T10:00:00+00:00\"\n  }\n}"
+            },
+            {
+              "name": "422 Validation Error",
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "body": "{\n  \"status\": \"error\",\n  \"message\": \"Validation failed\",\n  \"details\": {\n    \"email\": [\"Not a valid email address.\"]\n  }\n}"
+            },
+            {
+              "name": "409 Duplicate Email",
+              "status": "Conflict",
+              "code": 409,
+              "body": "{\n  \"status\": \"error\",\n  \"message\": \"A student with email 'ada.lovelace@example.com' already exists.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get All Students",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/students?page=1&per_page=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "students"],
+              "query": [
+                { "key": "page", "value": "1", "description": "Page number (default: 1)" },
+                { "key": "per_page", "value": "20", "description": "Records per page (max: 100, default: 20)" }
+              ]
+            },
+            "description": "Returns a paginated list of all students."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"status\": \"success\",\n  \"data\": {\n    \"students\": [\n      {\n        \"id\": 1,\n        \"first_name\": \"Ada\",\n        \"last_name\": \"Lovelace\",\n        \"email\": \"ada.lovelace@example.com\",\n        \"date_of_birth\": \"1815-12-10\",\n        \"grade\": \"A\",\n        \"created_at\": \"2024-01-01T10:00:00+00:00\",\n        \"updated_at\": \"2024-01-01T10:00:00+00:00\"\n      }\n    ],\n    \"pagination\": {\n      \"page\": 1,\n      \"per_page\": 20,\n      \"total\": 1,\n      \"pages\": 1,\n      \"has_next\": false,\n      \"has_prev\": false\n    }\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Student by ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/students/{{student_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "students", "{{student_id}}"]
+            },
+            "description": "Returns a single student by their numeric ID."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"status\": \"success\",\n  \"data\": {\n    \"id\": 1,\n    \"first_name\": \"Ada\",\n    \"last_name\": \"Lovelace\",\n    \"email\": \"ada.lovelace@example.com\",\n    \"date_of_birth\": \"1815-12-10\",\n    \"grade\": \"A\",\n    \"created_at\": \"2024-01-01T10:00:00+00:00\",\n    \"updated_at\": \"2024-01-01T10:00:00+00:00\"\n  }\n}"
+            },
+            {
+              "name": "404 Not Found",
+              "status": "Not Found",
+              "code": 404,
+              "body": "{\n  \"status\": \"error\",\n  \"message\": \"Student with id 999 not found.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update Student",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"grade\": \"A+\",\n  \"email\": \"ada.updated@example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/students/{{student_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "students", "{{student_id}}"]
+            },
+            "description": "Partially updates an existing student. Only include fields you want to change."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"status\": \"success\",\n  \"data\": {\n    \"id\": 1,\n    \"first_name\": \"Ada\",\n    \"last_name\": \"Lovelace\",\n    \"email\": \"ada.updated@example.com\",\n    \"date_of_birth\": \"1815-12-10\",\n    \"grade\": \"A+\",\n    \"created_at\": \"2024-01-01T10:00:00+00:00\",\n    \"updated_at\": \"2024-01-01T11:00:00+00:00\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Delete Student",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/students/{{student_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "students", "{{student_id}}"]
+            },
+            "description": "Permanently deletes a student record by ID."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"status\": \"success\",\n  \"message\": \"Student 1 deleted.\"\n}"
+            },
+            {
+              "name": "404 Not Found",
+              "status": "Not Found",
+              "code": 404,
+              "body": "{\n  \"status\": \"error\",\n  \"message\": \"Student with id 999 not found.\"\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
