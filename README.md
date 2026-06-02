@@ -108,8 +108,8 @@ All student endpoints are versioned under `/api/v1/students`.
 ### Prerequisites
 
 - Python 3.11+
-- PostgreSQL 14+ (or Docker)
-- `make` (optional but recommended)
+- Docker + Docker Compose
+- `make`
 
 ### Step 1 – Clone the repository
 
@@ -139,21 +139,43 @@ cp .env.example .env
 # Edit .env with your database credentials
 ```
 
-### Step 5 – Start PostgreSQL
+### Step 5 – Start PostgreSQL and the API via Docker
 
-**Option A – Docker (recommended)**
+**Option A – Docker Compose (recommended)**
+
 ```bash
-make docker-up
+make docker-db-up
 # Starts postgres:16 on localhost:5432
 ```
 
+```bash
+make docker-db-migrate
+# Applies all Alembic migration scripts inside the API container
+```
+
+```bash
+make docker-build
+# Builds the REST API docker image
+```
+
+```bash
+make docker-api-up
+# Starts the API container after the DB is running and migrations are applied
+```
+
+> `make docker-api-up` already performs the correct order:
+> 1. start the DB container
+> 2. run DB migrations
+> 3. start the API container
+
 **Option B – Local PostgreSQL**
+
 ```sql
 CREATE DATABASE student_db;
 ```
 Then update `DATABASE_URL` in `.env` accordingly.
 
-### Step 6 – Run database migrations
+### Step 6 – Run database migrations (local dev)
 
 ```bash
 make db-upgrade
@@ -263,7 +285,10 @@ make test-cov      Run tests with HTML coverage report
 make db-upgrade    Apply pending DB migrations
 make db-migrate    Generate a new migration (use msg="description")
 make db-downgrade  Revert the last migration
-make docker-up     Start PostgreSQL via Docker Compose
+make docker-db-up  Start PostgreSQL via Docker Compose
+make docker-db-migrate Apply DB migrations inside the API container
+make docker-build  Build the REST API Docker image
+make docker-api-up Start DB, run migrations, and start the API container
 make docker-down   Stop Docker Compose services
 make clean         Remove cache and coverage files
 ```
