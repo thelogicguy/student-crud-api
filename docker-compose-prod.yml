@@ -1,0 +1,128 @@
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  # Single DB container. In real production you'd use a managed DB (RDS, Cloud SQL)
+  # so you never run your own Postgres in a container. For this Vagrant setup it's fine.
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-student_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # NOT exposed on the host — only reachable from other containers on this network.
+    # The API containers connect to it via the service name "db".
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-student_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # ── API (Flask + Gunicorn) ──────────────────────────────────────────────────
+  # `docker compose up --scale api=2` launches 2 replicas of this service.
+  # Docker assigns them sequential names (student-api-1, student-api-2).
+  # Docker's internal DNS resolves the service name "api" to all replicas,
+  # which is how Nginx discovers and load-balances them.
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    restart: unless-stopped
+    # No port mapping — Nginx is the only entry point.
+    # Direct access to Gunicorn is intentionally blocked.
+    environment:
+      FLASK_ENV: production
+      FLASK_APP: run.py
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-student_db}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # ── Nginx (reverse proxy + load balancer) ───────────────────────────────────
+  # The sole public entry point. Listens on port 80 and distributes
+  # requests to the api replicas using least_conn load balancing.
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"              # exposed to the Vagrant VM (and forwarded to host:8080)
+    volumes:
+      # Mount our custom nginx.conf — no custom Dockerfile needed
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/nginx-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE    # required to bind to port 80
+    security_opt:
+      - no-new-privileges:true
+
+  # ── Falco (runtime threat detection) ────────────────────────────────────────
+  # Watches the host kernel via modern eBPF and raises alerts when a container
+  # behaves in a way it never should at runtime — a shell opening inside the API
+  # container, a write to /etc, a package manager running, an unexpected outbound
+  # connection. This is the runtime counterpart to the SAST/DAST scanners in CI:
+  # those analyse code before deploy; Falco catches a live attacker after deploy.
+  #
+  # App-specific rules live in ./falco/falco_rules.local.yaml and load on top of
+  # Falco's built-in ruleset. Alerts go to the container's stdout (`make prod-logs`);
+  # wire `json_output: true` + an http_output/program_output to ship them to your
+  # SIEM, Slack, or Falcosidekick.
+  falco:
+    image: falcosecurity/falco:0.39.2
+    restart: unless-stopped
+    # Falco needs host-level visibility (kernel events, all containers), so it
+    # runs privileged and outside the application's locked-down profile.
+    privileged: true
+    command: ["falco", "-o", "engine.kind=modern_ebpf", "-pc"]
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /etc:/host/etc:ro
+      - ./falco/falco_rules.local.yaml:/etc/falco/rules.d/falco_rules.local.yaml:ro
+    # Not attached to the backend network — it observes the kernel, not the app.
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+# All services share a single "backend" network.
+# Nothing is exposed unless explicitly mapped with "ports:".
+networks:
+  backend:
+    driver: bridge
+
+# ── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  pgdata:
+    driver: local

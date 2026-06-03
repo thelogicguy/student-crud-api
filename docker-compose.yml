@@ -16,5 +16,20 @@ services:
       timeout: 5s
       retries: 5
 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: student-crud-api:latest
+    depends_on:
+      - db
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    command: gunicorn run:app --bind 0.0.0.0:8000 --workers 2 --log-level info
+
 volumes:
   pgdata:

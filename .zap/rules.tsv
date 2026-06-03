@@ -1,0 +1,6 @@
+# OWASP ZAP baseline alert tuning — TAB-separated: <pluginId>\t<IGNORE|WARN|FAIL>\t<comment>
+# 10049 "Non-Storable Content" is informational and fires *because* we send
+# Cache-Control: no-store on this JSON API (which is what we want — no caching
+# of API responses). There is no header that removes it without re-introducing
+# the Storable/Cacheable finding, so it is ignored rather than "fixed".
+10049	IGNORE	Non-Storable Content — expected with Cache-Control: no-store on a JSON API

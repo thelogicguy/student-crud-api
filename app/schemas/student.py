@@ -1,5 +1,4 @@
 from marshmallow import Schema, fields, validate, validates, ValidationError
-import re
 
 
 class StudentCreateSchema(Schema):

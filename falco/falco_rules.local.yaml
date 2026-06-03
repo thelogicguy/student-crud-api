@@ -1,0 +1,67 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Falco local rules — student-crud-api
+#
+# Loaded *after* Falco's default ruleset (which already covers a broad range of
+# container/host attacks). These add app-specific, lower-noise detections scoped
+# to OUR containers — the API replicas, Postgres, and Nginx — so the alerts that
+# fire are immediately meaningful instead of generic.
+#
+# Falco watches the Linux kernel (syscalls, via modern eBPF) and flags behaviour
+# that should never happen in a healthy deployment — a shell opening inside a
+# container, an app process writing to /etc, an unexpected outbound connection.
+# That's the "AI/behavioural" layer for the RUNNING system: SAST/DAST in CI can't
+# see a live attacker; this can.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Our application containers. The API image is published as ".../student-crud-api";
+# Postgres and Nginx run under fixed service names in docker-compose-prod.yml.
+- macro: app_containers
+  condition: >
+    (container
+     and (container.image.repository contains "student-crud-api"
+          or container.name in (nginx, db)))
+
+# 1. No interactive/utility shell should ever start inside these containers at
+#    runtime. Gunicorn, Postgres and Nginx don't spawn shells in normal operation,
+#    so this is a high-signal indicator of a foothold (web-shell, RCE, exec-in).
+- rule: Shell spawned in app container
+  desc: An interactive shell was launched inside an application container.
+  condition: >
+    spawned_process and app_containers
+    and proc.name in (bash, sh, ash, dash, zsh, ksh, busybox)
+  output: >
+    Shell spawned in application container
+    (user=%user.name container=%container.name image=%container.image.repository
+     proc=%proc.cmdline parent=%proc.pname)
+  priority: WARNING
+  tags: [container, shell, mitre_execution, T1059]
+
+# 2. Writes under sensitive system paths inside a container usually mean tampering
+#    (dropping a binary, editing config, persistence). The app only writes to its
+#    own working dir and the DB volume, never to /etc, /bin, or /usr/bin.
+- rule: Write to system directory in app container
+  desc: A process wrote below /etc, /bin, or /usr/bin inside an application container.
+  condition: >
+    open_write and app_containers
+    and (fd.name startswith /etc
+         or fd.name startswith /bin
+         or fd.name startswith /usr/bin)
+  output: >
+    Write under a system directory inside application container
+    (file=%fd.name container=%container.name proc=%proc.cmdline)
+  priority: ERROR
+  tags: [container, filesystem, mitre_persistence, T1543]
+
+# 3. A package manager running inside a container at runtime is a classic
+#    post-exploitation step (installing tools). Images are built in CI, never
+#    mutated in production.
+- rule: Package management in app container
+  desc: apt/apk/pip and friends ran inside an application container at runtime.
+  condition: >
+    spawned_process and app_containers
+    and proc.name in (apt, apt-get, apk, dpkg, pip, pip3, npm, yum, dnf)
+  output: >
+    Package manager executed inside application container
+    (container=%container.name proc=%proc.cmdline)
+  priority: WARNING
+  tags: [container, software_mgmt, mitre_execution]

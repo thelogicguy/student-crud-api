@@ -1,5 +1,4 @@
 """Unit tests for /api/v1/students endpoints."""
-import pytest
 
 
 BASE = "/api/v1/students"

@@ -1,0 +1,634 @@
+name: API CI/CD (DevSecOps)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DevSecOps pipeline — security gates woven into every layer of delivery:
+#
+#   SOURCE   →  Secrets scan · SAST (Bandit, Semgrep, CodeQL) · SCA (pip-audit, Trivy fs)
+#   CONFIG   →  IaC misconfig (Hadolint, Trivy config, Checkov) · Policy-as-Code (OPA/Conftest)
+#   QUALITY  →  Lint + unit tests (Python matrix)
+#   ARTIFACT →  Build · SBOM (Syft) · Image CVE scan (Trivy) · Sign + attest (Cosign)
+#   RUNTIME  →  DAST (OWASP ZAP) against the running container
+#
+# "Shift-left" jobs (source/config/quality) run on EVERY pull request and push so
+# insecure code is caught before review. The artifact build only publishes on
+# push-to-main. Findings are emitted as SARIF and surfaced in the GitHub Security
+# tab + inline on PRs.
+# ══════════════════════════════════════════════════════════════════════════════
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - app/**
+      - tests/**
+      - Dockerfile
+      - requirements.txt
+      - Makefile
+      - docker-compose.yml
+      - run.py
+      - migrations/**
+      - .github/**          # re-run when the pipeline or policies change
+  pull_request:
+    branches: ["main"]       # run the full shift-left suite on every PR
+  workflow_dispatch:
+
+# Cancel superseded runs for the same branch/PR — saves minutes + credits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege default: jobs opt into the extra scopes they need (e.g. a SARIF
+# upload needs security-events:write; pushing to GHCR needs packages:write).
+permissions:
+  contents: read
+
+jobs:
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # LAYER 1 — SOURCE  (shift-left static analysis, runs on every PR + push)
+  # ════════════════════════════════════════════════════════════════════════════
+
+  # ── Secret detection ──────────────────────────────────────────────────────────
+  # Gitleaks scans the full git history for committed credentials, tokens and keys
+  # before they can be built into an image or leaked downstream.
+  secrets_scan:
+    name: Secrets Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0      # full history so every commit is scanned
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2.3.4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The action's built-in SARIF artifact upload uses a deprecated
+          # endpoint that 400s on current runners and crashes the job. We upload
+          # our own report below, so disable the broken internal upload.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+      - uses: actions/upload-artifact@v4.3.3
+        if: always()          # keep the report even when a leak fails the job
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+          if-no-files-found: ignore
+
+  # ── SAST: Bandit + Semgrep ─────────────────────────────────────────────────────
+  # Static Application Security Testing of our OWN Python source:
+  #   • Bandit  — Python-specific weakness detector (eval, weak crypto, SQL string
+  #               building, hardcoded secrets, insecure deserialization, etc.)
+  #   • Semgrep — pattern/dataflow rules (Flask injection, SSRF, auth bypass) via
+  #               the community "auto" ruleset.
+  # Both emit SARIF so findings land in the Security tab and annotate the PR diff.
+  sast:
+    name: SAST (Bandit + Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF to the Security tab
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Bandit scan
+        id: bandit
+        continue-on-error: true   # let SARIF upload before we enforce the gate
+        run: |
+          pip install "bandit[sarif]"
+          # -r app: recurse the application package (skip tests/venv).
+          bandit -r app -f sarif -o bandit.sarif
+      - name: Upload Bandit SARIF
+        uses: github/codeql-action/upload-sarif@v3.26.0
+        if: always()
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+      - name: Semgrep scan
+        run: |
+          pip install semgrep
+          # --config auto pulls Semgrep's curated rules for the detected languages.
+          semgrep scan --config auto --sarif --output semgrep.sarif --error 2>&1
+      - name: Upload Semgrep SARIF
+        uses: github/codeql-action/upload-sarif@v3.26.0
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      # Keep the raw SARIF as an artifact so the AI-triage job can read it.
+      - name: Upload SARIF for AI triage
+        uses: actions/upload-artifact@v4.3.3
+        if: always()
+        with:
+          name: sarif-sast
+          path: |
+            bandit.sarif
+            semgrep.sarif
+          if-no-files-found: ignore
+
+      # Fail the job if Bandit found issues (deferred so SARIF uploads first).
+      - name: Enforce Bandit gate
+        if: steps.bandit.outcome == 'failure'
+        run: exit 1
+
+  # ── SAST: CodeQL ────────────────────────────────────────────────────────────────
+  # GitHub's semantic code-analysis engine. Builds a queryable database of the code
+  # and runs the security-extended query suite to find taint-tracked vulnerabilities
+  # (injection, path traversal, unsafe deserialization) across data flows.
+  codeql:
+    name: SAST (CodeQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3.26.0
+        with:
+          languages: python
+          queries: security-extended
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3.26.0
+        with:
+          category: codeql-python
+
+  # ── SCA: dependency / supply-chain scanning ─────────────────────────────────────
+  # Software Composition Analysis of our THIRD-PARTY dependencies:
+  #   • pip-audit — checks pinned packages in requirements.txt against the Python
+  #                 Advisory DB (PyPA) for known CVEs.
+  #   • Trivy fs  — filesystem scan of the repo for vulnerable deps + leaked secrets
+  #                 + misconfigurations, emitted as SARIF.
+  sca:
+    name: SCA (pip-audit + Trivy fs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: pip-audit (dependency CVEs)
+        id: pip_audit
+        continue-on-error: true   # defer the gate so the Trivy SARIF still uploads
+        run: |
+          pip install pip-audit
+          # Audit exact pins; fails the job if any dependency has a known advisory.
+          pip-audit -r requirements.txt --strict
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@v0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "0"        # report-only here; the image scan (layer 4) is the hard gate
+      - name: Upload Trivy fs SARIF
+        uses: github/codeql-action/upload-sarif@v3.26.0
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+      - name: Upload SARIF for AI triage
+        uses: actions/upload-artifact@v4.3.3
+        if: always()
+        with:
+          name: sarif-sca
+          path: trivy-fs.sarif
+          if-no-files-found: ignore
+
+      # Enforce the pip-audit gate now that the SARIF has uploaded.
+      - name: Enforce pip-audit gate
+        if: steps.pip_audit.outcome == 'failure'
+        run: |
+          echo "::error::pip-audit found vulnerable dependencies — see the log above."
+          exit 1
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # LAYER 2 — CONFIG  (IaC misconfiguration + Policy-as-Code, every PR + push)
+  # ════════════════════════════════════════════════════════════════════════════
+  iac_policy:
+    name: IaC Scan & Policy-as-Code (OPA)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      # Hadolint — Dockerfile best-practice + security linter (apt pinning, root
+      # usage, shell pitfalls). Fails on warning or above.
+      - name: Hadolint (Dockerfile lint)
+        id: hadolint
+        continue-on-error: true   # defer the gate so later scanners + SARIF uploads run
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      # Trivy config — scans Dockerfile + docker-compose for misconfigurations
+      # (running as root, exposed ports, missing healthchecks) against built-in rules.
+      - name: Trivy config (IaC misconfig)
+        id: trivy_config
+        continue-on-error: true   # defer the gate so Checkov + SARIF uploads still run
+        uses: aquasecurity/trivy-action@v0.24.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-config.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+      - name: Upload Trivy config SARIF
+        uses: github/codeql-action/upload-sarif@v3.26.0
+        if: always()
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+
+      # Checkov — independent IaC static analyzer; second opinion on Dockerfile +
+      # compose misconfigurations, mapped to CIS / best-practice policies.
+      - name: Checkov (IaC static analysis)
+        id: checkov
+        continue-on-error: true   # defer the gate so the SARIF still uploads
+        uses: bridgecrewio/checkov-action@v12.2900.0
+        with:
+          directory: .
+          # `docker_compose` is NOT a valid Checkov framework — passing it makes
+          # Checkov abort with "Invalid frameworks specified" before scanning
+          # anything. Compose misconfig is covered by Trivy config + the OPA
+          # compose policy below, so Checkov scans the Dockerfile only.
+          framework: dockerfile
+          # cli,sarif (paired with console,<file>) is the combo Checkov documents as
+          # reliably emitting the SARIF — `sarif` alone can skip creating the file.
+          # output_file_path maps each format to a destination, so the sarif output
+          # is written directly to the file `checkov.sarif` (it is a FILE, not a dir).
+          output_format: cli,sarif
+          output_file_path: console,checkov.sarif
+          soft_fail: false
+      - name: Upload Checkov SARIF
+        uses: github/codeql-action/upload-sarif@v3.26.0
+        # Guard on the file existing: upload-sarif hard-errors on a missing path,
+        # which would crash the whole job if Checkov ever fails to emit SARIF.
+        # hashFiles must point at the real file — a nested path under a plain file
+        # makes hashFiles throw ENOTDIR and crash the whole template evaluation.
+        if: ${{ always() && hashFiles('checkov.sarif') != '' }}
+        with:
+          sarif_file: checkov.sarif
+          category: checkov
+      - name: Upload SARIF for AI triage
+        uses: actions/upload-artifact@v4.3.3
+        if: always()
+        with:
+          name: sarif-iac
+          path: |
+            trivy-config.sarif
+            checkov.sarif
+          if-no-files-found: ignore
+
+      # Enforce the IaC gates now that all SARIF has uploaded.
+      - name: Enforce IaC gates
+        run: |
+          fail=0
+          if [ "${{ steps.hadolint.outcome }}" = "failure" ]; then
+            echo "::error::Hadolint found Dockerfile issues at/above the warning threshold."; fail=1
+          fi
+          if [ "${{ steps.trivy_config.outcome }}" = "failure" ]; then
+            echo "::error::Trivy config found HIGH/CRITICAL IaC misconfigurations."; fail=1
+          fi
+          if [ "${{ steps.checkov.outcome }}" = "failure" ]; then
+            echo "::error::Checkov found IaC policy violations."; fail=1
+          fi
+          exit $fail
+
+      # OPA / Conftest — our OWN organisational policy, expressed as Rego in
+      # .github/policy/. Enforces rules the generic scanners don't know about
+      # (non-root USER required, no :latest, no privileged services, no inline
+      # secrets). Policy-as-Code = the security contract lives in version control.
+      - name: Install Conftest (OPA engine)
+        run: |
+          CONFTEST_VERSION=0.56.0
+          curl -fsSL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin conftest
+      - name: OPA policy — Dockerfile
+        run: conftest test --parser dockerfile --policy .github/policy/dockerfile Dockerfile
+      - name: OPA policy — docker-compose
+        run: conftest test --policy .github/policy/compose docker-compose.yml
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # LAYER 3 — QUALITY  (lint + unit tests, every PR + push)
+  # ════════════════════════════════════════════════════════════════════════════
+  test_lint:
+    name: Test & Lint (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/cache@v4.2.0
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ matrix.python-version }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-${{ matrix.python-version }}-
+      - run: pip install -r requirements.txt flake8   # flake8 powers `make lint`
+      - name: Lint
+        run: make lint
+      - name: Test
+        run: make test
+        env:
+          FLASK_ENV: testing
+          DATABASE_URL: "sqlite:///:memory:"   # in-memory DB — never touch a real database
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # LAYER 5 — RUNTIME  (DAST against the live container, every PR + push)
+  # Builds the production image locally, boots it against a throwaway Postgres,
+  # runs migrations, then turns OWASP ZAP loose on the running API.
+  # ════════════════════════════════════════════════════════════════════════════
+  dast:
+    name: DAST (OWASP ZAP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [test_lint]          # don't waste a runtime scan on code that fails tests
+    permissions:
+      contents: read
+      issues: write             # ZAP action opens/updates a tracking issue for findings
+
+    # Real Postgres so the API and its endpoints behave as they do in production.
+    services:
+      db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: student_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+
+      # Build the production target locally (load into the runner's docker daemon).
+      - name: Build production image
+        uses: docker/build-push-action@v5.4.0
+        with:
+          context: .
+          file: Dockerfile
+          target: production
+          load: true
+          tags: student-crud-api:dast
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --network host lets the container reach the Postgres service on localhost:5432
+      # and exposes the API on localhost:8000 for ZAP to target.
+      - name: Run migrations + start API
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/student_db
+        run: |
+          docker run -d --name api --network host \
+            -e DATABASE_URL="$DATABASE_URL" -e FLASK_ENV=production \
+            student-crud-api:dast
+          docker exec -e DATABASE_URL="$DATABASE_URL" api flask db upgrade
+          # Wait for the liveness/readiness probe to report healthy.
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8000/healthcheck && break
+            sleep 2
+          done
+
+      # OWASP ZAP baseline — passive spider + active passive-scan of the live app:
+      # detects missing security headers, cookie flags, info leakage, and common
+      # web weaknesses that only appear at runtime (where SAST/SCA are blind).
+      # v0.12.0 bundled the deprecated @actions/artifact-upload (v3 backend) which
+      # now 400s with "artifact name ... is not valid". v0.14.0 ships @actions/artifact v2
+      # (upload-artifact v4) and uploads the report cleanly.
+      - name: OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: http://localhost:8000
+          fail_action: true        # fail the pipeline on WARN/FAIL alerts
+          allow_issue_writing: true
+          # Alert tuning: IGNORE the informational "Non-Storable Content" alert
+          # that fires because we send Cache-Control: no-store (see file comment).
+          rules_file_name: .zap/rules.tsv
+
+      - name: API logs (on failure)
+        if: failure()
+        run: docker logs api || true
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # LAYER 4 — ARTIFACT  (build · SBOM · image CVE scan · sign · push)
+  # Publishes ONLY on push-to-main, and only after every shift-left gate passes.
+  # ════════════════════════════════════════════════════════════════════════════
+  build_publish:
+    name: Build, SBOM, Sign & Push
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [secrets_scan, sast, codeql, sca, iac_policy, test_lint, dast]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      id-token: write            # OIDC token for keyless Cosign signing
+      packages: write            # push to GHCR
+      security-events: write     # upload image-scan SARIF
+
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository_owner }}/student-crud-api
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+
+      # OCI-compliant tags + labels (sha + latest on default branch).
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.5.1
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+
+      # GHCR authenticates natively via GITHUB_TOKEN — no external registry secrets.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3.3.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # We sign the immutable digest (output below), never the mutable tag.
+      - name: Build and push image
+        id: build-push
+        uses: docker/build-push-action@v5.4.0
+        with:
+          context: .
+          file: Dockerfile
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true        # SLSA provenance attestation
+          sbom: false             # we generate a richer SBOM with Syft below
+
+      # ── SBOM — full inventory of everything inside the shipped image ───────────
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0.16.0
+      - name: Generate SBOM (SPDX + CycloneDX)
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}"
+          syft "$IMAGE" -o spdx-json=sbom.spdx.json
+          syft "$IMAGE" -o cyclonedx-json=sbom.cdx.json
+      - uses: actions/upload-artifact@v4.3.3
+        with:
+          name: sbom
+          path: |
+            sbom.spdx.json
+            sbom.cdx.json
+
+      # ── Image CVE scan — the hard supply-chain gate on the final artifact ──────
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@v0.24.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "1"          # HIGH/CRITICAL stops the release
+      - name: Upload Trivy image SARIF
+        uses: github/codeql-action/upload-sarif@v3.26.0
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      # ── Sign + attest — keyless Cosign over the immutable digest ───────────────
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+      - name: Sign image (keyless OIDC)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}"
+      - name: Attach SBOM attestation
+        run: |
+          cosign attest --yes --type spdx \
+            --predicate sbom.spdx.json \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # AI TRIAGE — advisory layer over the rule-based scanners (every PR).
+  # Collects the SARIF reports, pairs them with the PR diff, and asks Claude to
+  # de-duplicate, judge real exploitability in context, flag false positives,
+  # and rank what matters — then posts a single PR comment. This NEVER blocks
+  # the build; `security_gate` remains the hard pass/fail.
+  # ════════════════════════════════════════════════════════════════════════════
+  ai_triage:
+    name: AI Triage (Claude)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    needs: [sast, sca, iac_policy]
+    permissions:
+      contents: read
+      pull-requests: write     # post the triage summary as a PR comment
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0       # need both branches to compute the diff
+
+      - name: Build PR diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          git diff "origin/$BASE_REF...HEAD" > pr.diff || true
+
+      # Pull every "sarif-*" artifact the scan jobs uploaded into ./sarif.
+      - name: Download SARIF reports
+        uses: actions/download-artifact@v4.1.7
+        with:
+          pattern: sarif-*
+          path: sarif
+          merge-multiple: true
+
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Install Anthropic SDK
+        run: pip install "anthropic>=0.69"
+
+      - name: Run AI triage
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/ai_triage.py --sarif-dir sarif --diff-file pr.diff --output triage.md
+
+      - name: Post triage comment
+        continue-on-error: true   # fork PRs have a read-only token — don't fail on that
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr comment "${{ github.event.number }}" --body-file triage.md
+
+      - uses: actions/upload-artifact@v4.3.3
+        if: always()
+        with:
+          name: ai-triage-report
+          path: triage.md
+          if-no-files-found: ignore
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # SECURITY GATE — single aggregated status for branch-protection.
+  # Make THIS the required check; it fails if any security layer failed.
+  # ════════════════════════════════════════════════════════════════════════════
+  security_gate:
+    name: Security Gate
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [secrets_scan, sast, codeql, sca, iac_policy, test_lint, dast]
+    steps:
+      - name: Verify all security layers passed
+        run: |
+          results="${{ needs.secrets_scan.result }} ${{ needs.sast.result }} \
+                   ${{ needs.codeql.result }} ${{ needs.sca.result }} \
+                   ${{ needs.iac_policy.result }} ${{ needs.test_lint.result }} \
+                   ${{ needs.dast.result }}"
+          echo "Layer results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ]; then
+              echo "::error::A security layer did not pass ($r) — blocking."
+              exit 1
+            fi
+          done
+          echo "All DevSecOps layers passed."
