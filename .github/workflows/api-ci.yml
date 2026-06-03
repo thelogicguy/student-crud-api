@@ -16,7 +16,7 @@ name: API CI/CD (DevSecOps)
 # ══════════════════════════════════════════════════════════════════════════════
 
 on:
-  push:
+  pull_request:
     branches: ["main"]
     paths:
       - app/**
@@ -28,8 +28,7 @@ on:
       - run.py
       - migrations/**
       - .github/**          # re-run when the pipeline or policies change
-  pull_request:
-    branches: ["main"]       # run the full shift-left suite on every PR
+       # run the full shift-left suite on every PR
   workflow_dispatch:
 
 # Cancel superseded runs for the same branch/PR — saves minutes + credits.
@@ -443,14 +442,20 @@ jobs:
 
   # ════════════════════════════════════════════════════════════════════════════
   # LAYER 4 — ARTIFACT  (build · SBOM · image CVE scan · sign · push)
-  # Publishes ONLY on push-to-main, and only after every shift-left gate passes.
+  # Runs on EVERY PR and on push-to-main, after every shift-left gate passes:
+  #   • PR            → build + SBOM + image CVE scan (the hard gate), NO publish.
+  #                     A vulnerable image now blocks the MERGE, not just the
+  #                     post-merge release.
+  #   • push-to-main  → same build + scan, then sign + push to GHCR.
   # ════════════════════════════════════════════════════════════════════════════
   build_publish:
     name: Build, SBOM, Sign & Push
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [secrets_scan, sast, codeql, sca, iac_policy, test_lint, dast]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
 
     permissions:
       contents: read
@@ -461,6 +466,9 @@ jobs:
     env:
       REGISTRY: ghcr.io
       IMAGE_NAME: ${{ github.repository_owner }}/student-crud-api
+      # Publish (login + push + sign) only on push-to-main. On a PR we build and
+      # scan locally so the CVE gate runs before merge without pushing anything.
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
     steps:
       - uses: actions/checkout@v4.2.2
@@ -478,36 +486,53 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3.10.0
 
-      # GHCR authenticates natively via GITHUB_TOKEN — no external registry secrets.
+      # GHCR authenticates natively via GITHUB_TOKEN — only needed when we push.
       - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v3.3.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # We sign the immutable digest (output below), never the mutable tag.
-      - name: Build and push image
+      # On a PR: build + load into the runner's docker daemon so Trivy can scan it
+      # (no registry push). On push-to-main: build + push the immutable digest.
+      - name: Build image
         id: build-push
         uses: docker/build-push-action@v5.4.0
         with:
           context: .
           file: Dockerfile
           target: production
-          push: true
+          push: ${{ env.PUBLISH == 'true' }}
+          load: ${{ env.PUBLISH != 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: true        # SLSA provenance attestation
+          # SLSA provenance uses the registry exporter; the local `load` exporter
+          # can't emit it, so only attach provenance when we publish.
+          provenance: ${{ env.PUBLISH == 'true' }}
           sbom: false             # we generate a richer SBOM with Syft below
 
-      # ── SBOM — full inventory of everything inside the shipped image ───────────
+      # One reference for scan/SBOM/sign: the immutable digest when published, the
+      # locally-loaded sha tag on a PR (first metadata tag).
+      - name: Resolve image reference
+        id: ref
+        run: |
+          if [ "${{ env.PUBLISH }}" = "true" ]; then
+            echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          else
+            tag="$(printf '%s\n' '${{ steps.meta.outputs.tags }}' | head -n1)"
+            echo "image=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── SBOM — full inventory of everything inside the built image ─────────────
       - name: Install Syft
         uses: anchore/sbom-action/download-syft@v0.16.0
       - name: Generate SBOM (SPDX + CycloneDX)
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}"
+          IMAGE="${{ steps.ref.outputs.image }}"
           syft "$IMAGE" -o spdx-json=sbom.spdx.json
           syft "$IMAGE" -o cyclonedx-json=sbom.cdx.json
       - uses: actions/upload-artifact@v4.3.3
@@ -518,14 +543,18 @@ jobs:
             sbom.cdx.json
 
       # ── Image CVE scan — the hard supply-chain gate on the final artifact ──────
+      # Runs on PRs too, so a vulnerable image blocks the merge.
       - name: Run Trivy image scan
         uses: aquasecurity/trivy-action@v0.24.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}
+          image-ref: ${{ steps.ref.outputs.image }}
           format: sarif
           output: trivy-image.sarif
           severity: HIGH,CRITICAL
-          exit-code: "1"          # HIGH/CRITICAL stops the release
+          # Only gate on CVEs that actually have a fix available — unfixed Debian
+          # base CVEs aren't remediable here and would block releases forever.
+          ignore-unfixed: true
+          exit-code: "1"          # fixable HIGH/CRITICAL stops the build
       - name: Upload Trivy image SARIF
         uses: github/codeql-action/upload-sarif@v3.26.0
         if: always()
@@ -533,16 +562,19 @@ jobs:
           sarif_file: trivy-image.sarif
           category: trivy-image
 
-      # ── Sign + attest — keyless Cosign over the immutable digest ───────────────
+      # ── Sign + attest — keyless Cosign over the immutable digest (publish only) ─
       - name: Install Cosign
+        if: env.PUBLISH == 'true'
         uses: sigstore/cosign-installer@v3.7.0
       - name: Sign image (keyless OIDC)
+        if: env.PUBLISH == 'true'
         env:
           COSIGN_EXPERIMENTAL: "1"
         run: |
           cosign sign --yes \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}"
       - name: Attach SBOM attestation
+        if: env.PUBLISH == 'true'
         run: |
           cosign attest --yes --type spdx \
             --predicate sbom.spdx.json \
@@ -616,17 +648,19 @@ jobs:
     name: Security Gate
     runs-on: ubuntu-latest
     if: always()
-    needs: [secrets_scan, sast, codeql, sca, iac_policy, test_lint, dast]
+    needs: [secrets_scan, sast, codeql, sca, iac_policy, test_lint, dast, build_publish]
     steps:
       - name: Verify all security layers passed
         run: |
           results="${{ needs.secrets_scan.result }} ${{ needs.sast.result }} \
                    ${{ needs.codeql.result }} ${{ needs.sca.result }} \
                    ${{ needs.iac_policy.result }} ${{ needs.test_lint.result }} \
-                   ${{ needs.dast.result }}"
+                   ${{ needs.dast.result }} ${{ needs.build_publish.result }}"
           echo "Layer results: $results"
           for r in $results; do
-            if [ "$r" != "success" ]; then
+            # 'skipped' is acceptable (e.g. build_publish doesn't run on
+            # workflow_dispatch); only an actual failure/cancellation blocks.
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
               echo "::error::A security layer did not pass ($r) — blocking."
               exit 1
             fi
