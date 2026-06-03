@@ -39,8 +39,13 @@ deny[msg] {
 	msg := sprintf("ADD pulls a remote URL '%s' — use COPY or an explicit, checksummed RUN curl.", [src])
 }
 
+# Helper: true if the Dockerfile declares at least one HEALTHCHECK instruction.
+has_healthcheck {
+	input[_].Cmd == "healthcheck"
+}
+
 # WARN — prefer an explicit HEALTHCHECK so orchestrators detect a wedged process.
 warn[msg] {
-	not input[_].Cmd == "healthcheck"
+	not has_healthcheck
 	msg := "No HEALTHCHECK instruction — orchestrators cannot detect an unhealthy container."
 }
