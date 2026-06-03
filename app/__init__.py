@@ -28,6 +28,43 @@ def create_app(config=None):
     app.register_blueprint(health_bp)
     app.register_blueprint(students_bp, url_prefix="/api/v1/students")
 
+    # ── Root index ───────────────────────────────────────────────────────────
+    # A 200 at "/" gives clients (and the DAST spider) a discoverable entry point
+    # instead of a 404, and advertises the live endpoints.
+    @app.route("/", methods=["GET"])
+    def index():
+        return jsonify(
+            {
+                "status": "ok",
+                "service": "student-crud-api",
+                "endpoints": {
+                    "health": "/healthcheck",
+                    "students": "/api/v1/students",
+                },
+            }
+        ), 200
+
+    # ── Security headers ───────────────────────────────────────────────────────
+    # Applied to every response (including error handlers). Closes the baseline
+    # DAST findings: Storable/Cacheable Content [10049], missing CSP [10038],
+    # X-Content-Type-Options [10021], X-Frame-Options [10020], etc. This is a
+    # JSON API that serves no browser-rendered content, so the policy is strict.
+    @app.after_request
+    def set_security_headers(response):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'"
+        )
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = (
+            "geolocation=(), microphone=(), camera=()"
+        )
+        # Werkzeug leaks its version in the Server header; drop the detail.
+        response.headers["Server"] = "student-crud-api"
+        return response
+
     # ── Error Handlers ───────────────────────────────────────────────────────
     @app.errorhandler(404)
     def not_found(e):

@@ -269,12 +269,17 @@ jobs:
         with:
           directory: .
           framework: dockerfile,docker_compose
-          output_format: sarif
-          output_file_path: checkov.sarif
+          # cli,sarif (paired with console,<dir>) is the combo Checkov documents as
+          # reliably emitting the SARIF — `sarif` alone can skip creating the file.
+          # Checkov writes it to <dir>/results_sarif.sarif → checkov.sarif/results_sarif.sarif
+          output_format: cli,sarif
+          output_file_path: console,checkov.sarif
           soft_fail: false
       - name: Upload Checkov SARIF
         uses: github/codeql-action/upload-sarif@v3.26.0
-        if: always()
+        # Guard on the file existing: upload-sarif hard-errors on a missing path,
+        # which would crash the whole job if Checkov ever fails to emit SARIF.
+        if: ${{ always() && hashFiles('checkov.sarif/results_sarif.sarif') != '' }}
         with:
           sarif_file: checkov.sarif/results_sarif.sarif
           category: checkov
@@ -412,8 +417,11 @@ jobs:
       # OWASP ZAP baseline — passive spider + active passive-scan of the live app:
       # detects missing security headers, cookie flags, info leakage, and common
       # web weaknesses that only appear at runtime (where SAST/SCA are blind).
+      # v0.12.0 bundled the deprecated @actions/artifact-upload (v3 backend) which
+      # now 400s with "artifact name ... is not valid". v0.14.0 ships @actions/artifact v2
+      # (upload-artifact v4) and uploads the report cleanly.
       - name: OWASP ZAP baseline scan
-        uses: zaproxy/action-baseline@v0.12.0
+        uses: zaproxy/action-baseline@v0.14.0
         with:
           target: http://localhost:8000
           fail_action: true        # fail the pipeline on WARN/FAIL alerts
