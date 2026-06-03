@@ -268,7 +268,11 @@ jobs:
         uses: bridgecrewio/checkov-action@v12.2900.0
         with:
           directory: .
-          framework: dockerfile,docker_compose
+          # `docker_compose` is NOT a valid Checkov framework — passing it makes
+          # Checkov abort with "Invalid frameworks specified" before scanning
+          # anything. Compose misconfig is covered by Trivy config + the OPA
+          # compose policy below, so Checkov scans the Dockerfile only.
+          framework: dockerfile
           # cli,sarif (paired with console,<dir>) is the combo Checkov documents as
           # reliably emitting the SARIF — `sarif` alone can skip creating the file.
           # Checkov writes it to <dir>/results_sarif.sarif → checkov.sarif/results_sarif.sarif
@@ -426,6 +430,9 @@ jobs:
           target: http://localhost:8000
           fail_action: true        # fail the pipeline on WARN/FAIL alerts
           allow_issue_writing: true
+          # Alert tuning: IGNORE the informational "Non-Storable Content" alert
+          # that fires because we send Cache-Control: no-store (see file comment).
+          rules_file_name: .zap/rules.tsv
 
       - name: API logs (on failure)
         if: failure()

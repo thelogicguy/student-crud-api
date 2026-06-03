@@ -54,6 +54,9 @@ def create_app(config=None):
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
+        # Cross-Origin-Resource-Policy [ZAP 90004]: this API's responses should
+        # never be embedded as a cross-origin resource.
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = (
             "default-src 'none'; frame-ancestors 'none'"
         )

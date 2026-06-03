@@ -74,6 +74,12 @@ USER appuser
 
 EXPOSE 8000
 
+# Liveness/readiness probe. The slim base has no curl, so use the stdlib —
+# urlopen raises on any non-2xx (e.g. the /healthcheck 503 when the DB is down),
+# which marks the container unhealthy. Satisfies Checkov CKV_DOCKER_2 / Trivy DS026.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthcheck', timeout=3)" || exit 1
+
 CMD ["gunicorn", "run:app", \
      "--bind", "0.0.0.0:8000", \
      "--workers", "2", \
