@@ -1,6 +1,9 @@
 .PHONY: help install run dev test test-cov \
         db-init db-migrate db-upgrade db-downgrade db-reset \
-        lint clean docker-up docker-down
+        lint clean \
+        docker-build docker-build-dev docker-test docker-up docker-dev docker-down docker-logs docker-migrate \
+        vagrant-up vagrant-provision vagrant-ssh vagrant-halt vagrant-destroy vagrant-status \
+        prod-up prod-down prod-logs prod-status prod-migrate prod-restart prod-rebuild
 
 PYTHON     := python3
 PIP        := $(PYTHON) -m pip
@@ -63,12 +66,6 @@ test-cov:      ## Run tests with coverage report
 lint:          ## Run flake8 linter
 	$(PYTHON) -m flake8 app/ tests/ --max-line-length=100
 
-# ─── Docker ───────────────────────────────────────────────────────────────────
-docker-up:     ## Start Postgres via Docker Compose
-	docker compose up -d
-
-docker-down:   ## Stop Docker Compose services
-	docker compose down
 
 # ─── Clean ────────────────────────────────────────────────────────────────────
 clean:         ## Remove Python cache files and htmlcov

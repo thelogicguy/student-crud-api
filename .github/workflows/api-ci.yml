@@ -63,6 +63,10 @@ jobs:
         uses: gitleaks/gitleaks-action@v2.3.4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The action's built-in SARIF artifact upload uses a deprecated
+          # endpoint that 400s on current runners and crashes the job. We upload
+          # our own report below, so disable the broken internal upload.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
       - uses: actions/upload-artifact@v4.3.3
         if: always()          # keep the report even when a leak fails the job
         with:
@@ -108,7 +112,7 @@ jobs:
         run: |
           pip install semgrep
           # --config auto pulls Semgrep's curated rules for the detected languages.
-          semgrep scan --config auto --sarif --output semgrep.sarif --error
+          semgrep scan --config auto --sarif --output semgrep.sarif --error 2>&1
       - name: Upload Semgrep SARIF
         uses: github/codeql-action/upload-sarif@v3.26.0
         if: always()
@@ -176,6 +180,8 @@ jobs:
           python-version: "3.12"
 
       - name: pip-audit (dependency CVEs)
+        id: pip_audit
+        continue-on-error: true   # defer the gate so the Trivy SARIF still uploads
         run: |
           pip install pip-audit
           # Audit exact pins; fails the job if any dependency has a known advisory.
@@ -204,6 +210,13 @@ jobs:
           path: trivy-fs.sarif
           if-no-files-found: ignore
 
+      # Enforce the pip-audit gate now that the SARIF has uploaded.
+      - name: Enforce pip-audit gate
+        if: steps.pip_audit.outcome == 'failure'
+        run: |
+          echo "::error::pip-audit found vulnerable dependencies — see the log above."
+          exit 1
+
   # ════════════════════════════════════════════════════════════════════════════
   # LAYER 2 — CONFIG  (IaC misconfiguration + Policy-as-Code, every PR + push)
   # ════════════════════════════════════════════════════════════════════════════
@@ -220,6 +233,8 @@ jobs:
       # Hadolint — Dockerfile best-practice + security linter (apt pinning, root
       # usage, shell pitfalls). Fails on warning or above.
       - name: Hadolint (Dockerfile lint)
+        id: hadolint
+        continue-on-error: true   # defer the gate so later scanners + SARIF uploads run
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: Dockerfile
@@ -228,6 +243,8 @@ jobs:
       # Trivy config — scans Dockerfile + docker-compose for misconfigurations
       # (running as root, exposed ports, missing healthchecks) against built-in rules.
       - name: Trivy config (IaC misconfig)
+        id: trivy_config
+        continue-on-error: true   # defer the gate so Checkov + SARIF uploads still run
         uses: aquasecurity/trivy-action@v0.24.0
         with:
           scan-type: config
@@ -246,6 +263,8 @@ jobs:
       # Checkov — independent IaC static analyzer; second opinion on Dockerfile +
       # compose misconfigurations, mapped to CIS / best-practice policies.
       - name: Checkov (IaC static analysis)
+        id: checkov
+        continue-on-error: true   # defer the gate so the SARIF still uploads
         uses: bridgecrewio/checkov-action@v12.2900.0
         with:
           directory: .
@@ -268,6 +287,21 @@ jobs:
             trivy-config.sarif
             checkov.sarif/results_sarif.sarif
           if-no-files-found: ignore
+
+      # Enforce the IaC gates now that all SARIF has uploaded.
+      - name: Enforce IaC gates
+        run: |
+          fail=0
+          if [ "${{ steps.hadolint.outcome }}" = "failure" ]; then
+            echo "::error::Hadolint found Dockerfile issues at/above the warning threshold."; fail=1
+          fi
+          if [ "${{ steps.trivy_config.outcome }}" = "failure" ]; then
+            echo "::error::Trivy config found HIGH/CRITICAL IaC misconfigurations."; fail=1
+          fi
+          if [ "${{ steps.checkov.outcome }}" = "failure" ]; then
+            echo "::error::Checkov found IaC policy violations."; fail=1
+          fi
+          exit $fail
 
       # OPA / Conftest — our OWN organisational policy, expressed as Rego in
       # .github/policy/. Enforces rules the generic scanners don't know about
@@ -518,9 +552,11 @@ jobs:
           fetch-depth: 0       # need both branches to compute the diff
 
       - name: Build PR diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git fetch --no-tags origin "${{ github.base_ref }}"
-          git diff "origin/${{ github.base_ref }}...HEAD" > pr.diff || true
+          git fetch --no-tags origin "$BASE_REF"
+          git diff "origin/$BASE_REF...HEAD" > pr.diff || true
 
       # Pull every "sarif-*" artifact the scan jobs uploaded into ./sarif.
       - name: Download SARIF reports

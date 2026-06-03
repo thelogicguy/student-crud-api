@@ -3,7 +3,6 @@
 # Each concern is isolated into its own function: readable, testable, idempotent.
 
 set -euo pipefail
-IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log()     { echo -e "${GREEN}[provision] $*${NC}"; }

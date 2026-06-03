@@ -26,6 +26,9 @@ FROM python-base AS builder
 WORKDIR /build
 
 # Install system build dependencies
+# DL3008: apt versions deliberately unpinned — they track the slim base image and
+# pinning exact strings breaks on every upstream base-image refresh.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
@@ -38,6 +41,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Copy and install dependencies first (better layer caching —
 # requirements.txt changes far less often than source code)
 COPY requirements.txt .
+# DL3013: application packages are fully pinned in requirements.txt; only pip
+# itself is upgraded here, which we intentionally leave unpinned.
+# hadolint ignore=DL3013
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -50,6 +56,7 @@ FROM python-base AS production
 WORKDIR /app
 
 # Install only the runtime system library (not the dev headers)
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*

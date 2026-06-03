@@ -1,5 +1,5 @@
 from flask import Flask, jsonify
-from app.config import get_config, TestingConfig
+from app.config import get_config
 from app.extensions import db, migrate
 from app.logger import setup_logger
 from app.routes.health import health_bp
