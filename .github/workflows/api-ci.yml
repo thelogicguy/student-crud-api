@@ -273,9 +273,10 @@ jobs:
           # anything. Compose misconfig is covered by Trivy config + the OPA
           # compose policy below, so Checkov scans the Dockerfile only.
           framework: dockerfile
-          # cli,sarif (paired with console,<dir>) is the combo Checkov documents as
+          # cli,sarif (paired with console,<file>) is the combo Checkov documents as
           # reliably emitting the SARIF — `sarif` alone can skip creating the file.
-          # Checkov writes it to <dir>/results_sarif.sarif → checkov.sarif/results_sarif.sarif
+          # output_file_path maps each format to a destination, so the sarif output
+          # is written directly to the file `checkov.sarif` (it is a FILE, not a dir).
           output_format: cli,sarif
           output_file_path: console,checkov.sarif
           soft_fail: false
@@ -283,9 +284,11 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3.26.0
         # Guard on the file existing: upload-sarif hard-errors on a missing path,
         # which would crash the whole job if Checkov ever fails to emit SARIF.
-        if: ${{ always() && hashFiles('checkov.sarif/results_sarif.sarif') != '' }}
+        # hashFiles must point at the real file — a nested path under a plain file
+        # makes hashFiles throw ENOTDIR and crash the whole template evaluation.
+        if: ${{ always() && hashFiles('checkov.sarif') != '' }}
         with:
-          sarif_file: checkov.sarif/results_sarif.sarif
+          sarif_file: checkov.sarif
           category: checkov
       - name: Upload SARIF for AI triage
         uses: actions/upload-artifact@v4.3.3
@@ -294,7 +297,7 @@ jobs:
           name: sarif-iac
           path: |
             trivy-config.sarif
-            checkov.sarif/results_sarif.sarif
+            checkov.sarif
           if-no-files-found: ignore
 
       # Enforce the IaC gates now that all SARIF has uploaded.
