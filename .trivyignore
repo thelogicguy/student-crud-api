@@ -6,3 +6,4 @@
 #   adoptable without a breaking migration. Suppressed and tracked until either
 #   a 3.x backport ships or the app is migrated to marshmallow 4.x.
 CVE-2025-68480
+

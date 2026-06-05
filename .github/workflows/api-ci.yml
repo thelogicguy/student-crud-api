@@ -588,6 +588,18 @@ jobs:
           ignore-unfixed: true
           trivyignores: .trivyignore   # documented suppressions (see file)
           exit-code: "1"          # fixable HIGH/CRITICAL stops the build
+
+      - name: Show Trivy findings
+        if: always()
+        uses: aquasecurity/trivy-action@v0.24.0
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "0"
+          
       - name: Upload Trivy image SARIF
         uses: github/codeql-action/upload-sarif@v3.26.0
         if: always()
