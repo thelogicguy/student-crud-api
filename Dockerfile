@@ -1,7 +1,8 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # ARGs declared before any FROM so they are available to all stages
 # ──────────────────────────────────────────────────────────────────────────────
-ARG PYTHON_VERSION=3.12
+# ARG PYTHON_VERSION=3.12
+ARG PYTHON_DIGEST=sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203
 ARG ENVIRONMENT=production
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -9,7 +10,7 @@ ARG ENVIRONMENT=production
 # Single alias for the base image so every stage uses the exact same version.
 # Update PYTHON_VERSION in one place → all stages follow.
 # ──────────────────────────────────────────────────────────────────────────────
-FROM python:${PYTHON_VERSION}-slim AS python-base
+FROM python@${PYTHON_DIGEST} AS python-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
