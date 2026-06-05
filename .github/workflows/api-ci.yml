@@ -550,9 +550,32 @@ jobs:
         with:
           image-ref: ${{ steps.ref.outputs.image }}
           format: table
+          # Write the table to a file instead of stdout so the next step can
+          # surface it both in the job log AND the Step Summary — the inline
+          # stdout table lands in a green (collapsed) step that nobody sees
+          # once the SARIF gate below goes red.
+          output: trivy-image.txt
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          trivyignores: .trivyignore   # documented suppressions (see file)
           exit-code: "0"          # report-only; the SARIF step below is the gate
+
+      # Surface the CVE table where it's actually read: the job log and the
+      # GitHub Step Summary. `always()` so it renders even when the gate fails —
+      # that's precisely when you need the list of what to fix.
+      - name: Publish CVE table
+        if: always()
+        run: |
+          {
+            echo "## Trivy image scan — fixable HIGH/CRITICAL CVEs"
+            echo '```'
+            cat trivy-image.txt 2>/dev/null || echo "No Trivy table report was produced."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::group::Trivy image scan (HIGH/CRITICAL, fixable)"
+          cat trivy-image.txt 2>/dev/null || echo "No Trivy table report was produced."
+          echo "::endgroup::"
+
       - name: Run Trivy image scan
         uses: aquasecurity/trivy-action@v0.24.0
         with:
@@ -563,6 +586,7 @@ jobs:
           # Only gate on CVEs that actually have a fix available — unfixed Debian
           # base CVEs aren't remediable here and would block releases forever.
           ignore-unfixed: true
+          trivyignores: .trivyignore   # documented suppressions (see file)
           exit-code: "1"          # fixable HIGH/CRITICAL stops the build
       - name: Upload Trivy image SARIF
         uses: github/codeql-action/upload-sarif@v3.26.0

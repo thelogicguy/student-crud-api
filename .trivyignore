@@ -1,0 +1,8 @@
+# Trivy vulnerability suppressions — each entry MUST carry a justification.
+#
+# CVE-2025-68480 — marshmallow 3.26.2
+#   The only fixed release is marshmallow 4.x. This project is deliberately
+#   pinned to the marshmallow 3.x API (see requirements.txt), so the fix is not
+#   adoptable without a breaking migration. Suppressed and tracked until either
+#   a 3.x backport ships or the app is migrated to marshmallow 4.x.
+CVE-2025-68480
