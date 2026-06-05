@@ -545,36 +545,18 @@ jobs:
       # ── Image CVE scan — the hard supply-chain gate on the final artifact ──────
       # Runs on PRs too, so a vulnerable image blocks the merge.
       # First a human-readable table to the job log, then the SARIF used to gate.
-      - name: Run Trivy image scan (table report)
+      - name: Run Trivy image scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.ref.outputs.image }}
-          format: table
-          # Write the table to a file instead of stdout so the next step can
-          # surface it both in the job log AND the Step Summary — the inline
-          # stdout table lands in a green (collapsed) step that nobody sees
-          # once the SARIF gate below goes red.
-          output: trivy-image.txt
+          format: sarif
+          output: trivy-image.sarif
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          trivyignores: .trivyignore   # documented suppressions (see file)
-          exit-code: "0"          # report-only; the SARIF step below is the gate
+          trivyignores: .trivyignore
+          exit-code: "1"
+        continue-on-error: true
 
-      # Surface the CVE table where it's actually read: the job log and the
-      # GitHub Step Summary. `always()` so it renders even when the gate fails —
-      # that's precisely when you need the list of what to fix.
-      - name: Publish CVE table
-        if: always()
-        run: |
-          {
-            echo "## Trivy image scan — fixable HIGH/CRITICAL CVEs"
-            echo '```'
-            cat trivy-image.txt 2>/dev/null || echo "No Trivy table report was produced."
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::group::Trivy image scan (HIGH/CRITICAL, fixable)"
-          cat trivy-image.txt 2>/dev/null || echo "No Trivy table report was produced."
-          echo "::endgroup::"
       - name: Show Trivy findings
         if: always()
         uses: aquasecurity/trivy-action@v0.36.0
@@ -585,7 +567,7 @@ jobs:
           ignore-unfixed: true
           trivyignores: .trivyignore
           exit-code: "0"
-
+          
       - name: Upload Trivy image SARIF
         uses: github/codeql-action/upload-sarif@v3.26.0
         if: always()
