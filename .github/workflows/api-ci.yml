@@ -575,20 +575,6 @@ jobs:
           echo "::group::Trivy image scan (HIGH/CRITICAL, fixable)"
           cat trivy-image.txt 2>/dev/null || echo "No Trivy table report was produced."
           echo "::endgroup::"
-
-      - name: Run Trivy image scan
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ steps.ref.outputs.image }}
-          format: sarif
-          output: trivy-image.sarif
-          severity: HIGH,CRITICAL
-          # Only gate on CVEs that actually have a fix available — unfixed Debian
-          # base CVEs aren't remediable here and would block releases forever.
-          ignore-unfixed: true
-          trivyignores: .trivyignore   # documented suppressions (see file)
-          exit-code: "1"          # fixable HIGH/CRITICAL stops the build
-
       - name: Show Trivy findings
         if: always()
         uses: aquasecurity/trivy-action@v0.36.0
