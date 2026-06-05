@@ -544,6 +544,15 @@ jobs:
 
       # ── Image CVE scan — the hard supply-chain gate on the final artifact ──────
       # Runs on PRs too, so a vulnerable image blocks the merge.
+      # First a human-readable table to the job log, then the SARIF used to gate.
+      - name: Run Trivy image scan (table report)
+        uses: aquasecurity/trivy-action@v0.24.0
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"          # report-only; the SARIF step below is the gate
       - name: Run Trivy image scan
         uses: aquasecurity/trivy-action@v0.24.0
         with:
