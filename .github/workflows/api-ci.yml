@@ -29,6 +29,19 @@ on:
       - migrations/**
       - .github/**          # re-run when the pipeline or policies change
        # run the full shift-left suite on every PR
+  push:
+    branches: ["main"]
+    paths:
+      - app/**
+      - tests/**
+      - Dockerfile
+      - requirements.txt
+      - Makefile
+      - docker-compose.yml
+      - run.py
+      - migrations/**
+      - .github/**
+      
   workflow_dispatch:
 
 # Cancel superseded runs for the same branch/PR — saves minutes + credits.
@@ -567,7 +580,7 @@ jobs:
           ignore-unfixed: true
           trivyignores: .trivyignore
           exit-code: "0"
-          
+
       - name: Upload Trivy image SARIF
         uses: github/codeql-action/upload-sarif@v3.26.0
         if: always()
