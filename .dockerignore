@@ -1,0 +1,35 @@
+# Secrets — must never enter an image layer (.env was shipping before)
+.env
+.env.*
+!.env.example
+
+# Virtual environments / Python caches
+.venv
+env/
+venv/
+ENV/
+.Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+
+# Version control & CI metadata
+.git
+.gitignore
+.github
+
+# Tooling / infra not needed at runtime
+.zap
+.dockerignore
+Dockerfile
+Makefile
+README.md
+docker-compose*.yml
+Vagrantfile
+postman_collection.json
+docs
+falco
+nginx
+

@@ -1,7 +1,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # ARGs declared before any FROM so they are available to all stages
 # ──────────────────────────────────────────────────────────────────────────────
-ARG PYTHON_VERSION=3.12
+# ARG PYTHON_VERSION=3.12
 ARG ENVIRONMENT=production
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -9,7 +9,7 @@ ARG ENVIRONMENT=production
 # Single alias for the base image so every stage uses the exact same version.
 # Update PYTHON_VERSION in one place → all stages follow.
 # ──────────────────────────────────────────────────────────────────────────────
-FROM python:${PYTHON_VERSION}-slim AS python-base
+FROM python@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS python-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -28,8 +28,10 @@ WORKDIR /build
 # Install system build dependencies
 # DL3008: apt versions deliberately unpinned — they track the slim base image and
 # pinning exact strings breaks on every upstream base-image refresh.
-# hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# DL3005: apt-get upgrade is intentional — it pulls Debian security patches into
+# the slim base layer so the Trivy image gate doesn't fail on fixable OS CVEs.
+# hadolint ignore=DL3008,DL3005
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -56,8 +58,10 @@ FROM python-base AS production
 WORKDIR /app
 
 # Install only the runtime system library (not the dev headers)
-# hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# DL3005: apt-get upgrade applies Debian security patches to the runtime layer —
+# this is the layer that actually ships, so it's where the OS CVE fixes must land.
+# hadolint ignore=DL3008,DL3005
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
